@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/sh
 
 if [ $# -lt 2 ]
 then
@@ -16,8 +16,8 @@ then
 fi
 
 cd ${filesdir}
-filecount=`find * -true | wc -l`
-matchcount=`grep -r ${searchstr} | wc -l`
+filecount=$(find * | wc -l)
+matchcount=$(grep ${searchstr} * | wc -l)
 
 echo "The number of files are ${filecount} and the number of matching lines are ${matchcount}"
 
