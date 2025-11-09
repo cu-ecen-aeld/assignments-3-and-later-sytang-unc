@@ -2,6 +2,7 @@
 #include <unistd.h>
 #include <stdlib.h>
 #include <stdio.h>
+#include <time.h>
 
 // Optional: use these functions to add debug or error prints to your application
 #define DEBUG_LOG(msg,...)
@@ -14,6 +15,31 @@ void* threadfunc(void* thread_param)
     // TODO: wait, obtain mutex, wait, release mutex as described by thread_data structure
     // hint: use a cast like the one below to obtain thread arguments from your parameter
     //struct thread_data* thread_func_args = (struct thread_data *) thread_param;
+
+    struct thread_data* thread_func_args;
+    thread_func_args = (struct thread_data *) thread_param;
+
+    struct timespec obtain, release;
+
+    obtain = (struct timespec) {.tv_sec = 0, .tv_nsec = 1000*thread_func_args->wait_to_obtain_ms};
+    release = (struct timespec) {.tv_sec = 0, .tv_nsec = 1000*thread_func_args->wait_to_release_ms};
+
+    thread_func_args->thread_complete_success = false;
+
+    if (nanosleep(&obtain, NULL) == -1)
+        return thread_param;
+
+    if (pthread_mutex_lock(thread_func_args->mutex))
+        return thread_param;
+
+    if (nanosleep(&release, NULL) == -1)
+        goto unlock;
+
+    thread_func_args->thread_complete_success = true;
+
+unlock:
+    pthread_mutex_unlock(thread_func_args->mutex);
+
     return thread_param;
 }
 
@@ -28,6 +54,18 @@ bool start_thread_obtaining_mutex(pthread_t *thread, pthread_mutex_t *mutex,int 
      *
      * See implementation details in threading.h file comment block
      */
-    return false;
+
+    struct thread_data *td;
+    td = (struct thread_data*) malloc(sizeof(struct thread_data));
+    if (!td)
+        return false;
+
+    *td = (struct thread_data) {
+        .mutex = mutex, 
+        .wait_to_obtain_ms = wait_to_obtain_ms, 
+        .wait_to_release_ms = wait_to_release_ms
+    };
+
+    return !pthread_create(thread, NULL, threadfunc, td);
 }
 
