@@ -1,3 +1,5 @@
+all: writer
+
 writer: writer.c
 	$(CROSS_COMPILE)$(CC) -o writer writer.c
 
