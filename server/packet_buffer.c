@@ -9,6 +9,7 @@ int init_pb(struct packet_buffer *pb) {
         return -1;
     pb->buf[AESD_DEFAULT_LEN] = '\0';
     pb->return_cnt = 0;
+    return 0;
 }
 
 void free_pb(struct packet_buffer *pb) {
