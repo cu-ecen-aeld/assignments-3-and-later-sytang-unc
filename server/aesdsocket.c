@@ -1,92 +1,169 @@
 #define _POSIX_C_SOURCE 200809L
 #include<syslog.h>
 #include<unistd.h>
-#include<stdbool.h>
-#include<sys/types.h>
+#include<stdio.h>
 #include<sys/socket.h>
-#include<stdlib.h>
 #include<netdb.h>
 #include<arpa/inet.h>
-#include<stdio.h>
-#include<errno.h>
 #include<signal.h>
 #include<fcntl.h>
-#include<string.h>
+#include<errno.h>
+#include<pthread.h>
+#include<time.h>
 
-volatile bool loop_flag;
+#include "loop_flag.h"
+#include "packet_buffer.h"
 
-void handler(int sig) {
-    loop_flag = false;
-}
+struct thread_arg {
+    int s_fd;
+    struct sockaddr_in addr;
+    pthread_t thread;
+    struct thread_arg *next;
+};
 
-#define AESD_BUFF 100
+static struct thread_arg *completed = NULL;
+static int waiting_on = 0;
+static pthread_mutex_t comp_mutex = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t comp_cond = PTHREAD_COND_INITIALIZER;
 
-bool send_file(int s_fd, int f_fd) {
-    if (lseek(f_fd, 0, SEEK_SET) == -1) {
-        syslog(LOG_ERR, "Failed to seek file");
-        return false;
-    }
+static pthread_mutex_t file_mutex = PTHREAD_MUTEX_INITIALIZER;
+static int f_fd;
 
-    char buf[AESD_BUFF];
+int process_packets(int s_fd) {
+    struct packet_buffer pb;
     ssize_t nr_r;
-    nr_r = 1;
-    while (nr_r) {
-        nr_r = read(f_fd, buf, AESD_BUFF);
-        if (nr_r == -1) {
-            syslog(LOG_ERR, "Failed to read from file");
-            return false;
-        }
-        if (write(s_fd, buf, nr_r) == -1) {
-            syslog(LOG_ERR, "Failed to write to socket");
-            return false;
-        }
-    }
-    return true;
-}
 
-bool process_packets(int s_fd, int f_fd) {
-    char buf[AESD_BUFF + 1];
-    ssize_t nr_r;
+    if (init_pb(&pb) == -1) {
+        syslog(LOG_ERR, "Failed to init packet_buffer");
+        return -1;
+    }
 
     nr_r = 1;
     while (loop_flag && nr_r) {
-        nr_r = read(s_fd, buf, AESD_BUFF);
-        if (nr_r == -1) {
-            if (errno == EINTR)
-                continue;
-            syslog(LOG_ERR, "Failed to read from socket");
-            return false;
+        nr_r = read_pb(s_fd, &pb);
+        if (pthread_mutex_lock(&file_mutex)) {
+            syslog(LOG_ERR, "Failed to lock file mutex for writing");
+            return -1;
         }
-        buf[nr_r] = '\0';
-        if (nr_r) {
-            char *begin, *packet_end;
-            begin = buf;
-            packet_end = strchr(begin, '\n');
-            while (packet_end) {
-                packet_end++;
-                if (write(f_fd, begin, (packet_end - begin)) == -1) {
-                    syslog(LOG_ERR, "Failed to write to file");
-                    return false;
-                }
-                if (!send_file(s_fd, f_fd))
-                    return false;
-                begin = packet_end;
-                packet_end = strchr(begin, '\n');
-            }
-            if (*begin)
-                if (write(f_fd, begin, nr_r - (begin - buf)) == -1) {
-                    syslog(LOG_ERR, "Failed to write to file");
-                    return false;
-                }
+        write_pb(f_fd, s_fd, &pb);
+        if (pthread_mutex_unlock(&file_mutex)) {
+            syslog(LOG_ERR, "Failed to unlock file mutex after writing");
+            return -1;
         }
     }
-    return true;
+    
+    free_pb(&pb);
+
+    return 0;
+}
+
+void *do_process_packets(void *arg) {
+    struct thread_arg *ta = (struct thread_arg*) arg;
+    process_packets(ta->s_fd);
+
+    syslog(LOG_USER, "Closed connection from %s", inet_ntoa(ta->addr.sin_addr));
+    close(ta->s_fd);
+
+    if (pthread_mutex_lock(&comp_mutex)) {
+        syslog(LOG_ERR, "Failed to lock completion mutex on thread completion");
+        return NULL;
+    }
+    ta->next = completed;
+    completed = ta;
+    if (pthread_cond_signal(&comp_cond)) {
+        syslog(LOG_ERR, "Failed to signal thread completion");
+        return NULL;
+    }
+    if (pthread_mutex_unlock(&comp_mutex)) {
+        syslog(LOG_ERR, "Failed to unlock completion mutex on thread completion");
+        return NULL;
+    }
+
+    return NULL;
+}
+
+void *do_join_complete(void *arg) {
+    if (pthread_mutex_lock(&comp_mutex)) {
+        syslog(LOG_ERR, "Failed to acquire completion mutex in completion thread");
+        return NULL;
+    }
+    while (loop_flag || waiting_on) {
+        if (pthread_cond_wait(&comp_cond, &comp_mutex)) {
+            syslog(LOG_ERR, "Failed to wait on condition variable");
+            return NULL;
+        }
+        while (completed) {
+            struct thread_arg *next;
+            if (pthread_join(completed->thread, NULL)) {
+                syslog(LOG_ERR, "Failed to join pthread");
+                return NULL;
+            }
+            next = completed->next;
+            free(completed);
+            completed = next;
+            waiting_on--;
+        }
+    }
+    if (pthread_mutex_unlock(&comp_mutex)) {
+        syslog(LOG_ERR, "Failed to release completion mutex in completion thread");
+        return NULL;
+    }
+
+    return NULL;
+}
+
+void *do_print_ts(void *arg) {
+    char t_str[100];
+    time_t t;
+    struct tm *tmp;
+    size_t nr_t;
+    struct timespec sleep_time;
+
+    sleep_time = (struct timespec) {.tv_sec = 10};
+
+    while (loop_flag) {
+        t = time(NULL);
+        tmp = localtime(&t);
+        if (tmp == NULL) {
+            syslog(LOG_ERR, "Failed to get localtime");
+            return NULL;
+        }
+
+        nr_t = strftime(t_str, sizeof(t_str), "timestamp:%a, %d %b %Y %T %z\n", tmp);
+
+        if (pthread_mutex_lock(&file_mutex)) {
+            syslog(LOG_ERR, "Failed to lock file mutex to write timestamp");
+            return NULL;
+        }
+        if (write(f_fd, t_str, nr_t) == -1) {
+            syslog(LOG_ERR, "Failed to write timestamp");
+            return NULL;
+        }
+        if (pthread_mutex_unlock(&file_mutex)) {
+            syslog(LOG_ERR, "Failed to unlock file mutex after writing timestamp");
+            return NULL;
+        }
+
+        nanosleep(&sleep_time, NULL);
+    }
+    return NULL;
 }
 
 int do_aesdsocket(int socket_fd) {
-    int a_fd;
-    if ((a_fd = open("/var/tmp/aesdsocketdata", O_RDWR | O_CREAT, S_IRUSR | S_IWUSR)) == -1) {
+    if ((f_fd = open("/var/tmp/aesdsocketdata", O_RDWR | O_CREAT, S_IRUSR | S_IWUSR)) == -1) {
         syslog(LOG_ERR, "Failed to open /var/tmp/aesdsocketdata");
+        return -1;
+    }
+
+    pthread_t comp_thread;
+    if (pthread_create(&comp_thread, NULL, do_join_complete, NULL)) {
+        syslog(LOG_ERR, "Failed to create completion cleanup thread");
+        return -1;
+    }
+
+    pthread_t ts_thread;
+    if (pthread_create(&ts_thread, NULL, do_print_ts, NULL)) {
+        syslog(LOG_ERR, "Failed ot create ts printing thread");
         return -1;
     }
 
@@ -96,25 +173,78 @@ int do_aesdsocket(int socket_fd) {
     }
 
     int s_fd;
-    struct sockaddr_in addr;
     socklen_t addr_len;
 
     while (loop_flag) {
-        addr_len = sizeof(struct sockaddr_in);
-        s_fd = accept(socket_fd, (struct sockaddr*) &addr, &addr_len);
-        if (s_fd == -1) {
-            if (errno == EINTR)
-                continue;
-            syslog(LOG_ERR, "Failed to accept socket connection");
+        struct thread_arg *ta;
+        ta = (struct thread_arg*) malloc(sizeof(struct thread_arg));
+        if (!ta) {
+            syslog(LOG_ERR, "Failed to allocate memory for thread_arg");
             return -1;
         }
-        syslog(LOG_USER, "Accepted connection from %s", inet_ntoa(addr.sin_addr));
-        process_packets(s_fd, a_fd);
-        syslog(LOG_USER, "Closed connection from %s", inet_ntoa(addr.sin_addr));
-        close(s_fd);
+
+
+        addr_len = sizeof(struct sockaddr_in);
+        s_fd = accept(socket_fd, (struct sockaddr*) &ta->addr, &addr_len);
+        if (s_fd == -1) {
+            if (errno == EINTR) {
+                free(ta);
+                continue;
+            }
+            syslog(LOG_ERR, "Failed to accept socket connection");
+            free(ta);
+            return -1;
+        }
+        syslog(LOG_USER, "Accepted connection from %s", inet_ntoa(ta->addr.sin_addr));
+        ta->s_fd = s_fd;
+        ta->next = NULL;
+
+        if (pthread_mutex_lock(&comp_mutex)) {
+            syslog(LOG_ERR, "Failed to lock completion mutex when creating thread");
+            return -1;
+        }
+        if (pthread_create(&ta->thread, NULL, do_process_packets, ta)) {
+            syslog(LOG_ERR, "Failed to create pthread");
+            free(ta);
+            return -1;
+        }
+        waiting_on++;
+        if (pthread_mutex_unlock(&comp_mutex)) {
+            syslog(LOG_ERR, "Failed to unlock completion mutex when creating thread");
+            return -1;
+        }
     }
 
-    close(a_fd);
+    if (pthread_mutex_lock(&comp_mutex)) {
+        syslog(LOG_ERR, "Failed to lock completion mutex after TERM received");
+        return -1;
+    }
+    if (pthread_cond_signal(&comp_cond)) {
+        syslog(LOG_ERR, "Failed to signal completion thread after TERM received");
+        return -1;
+    }
+    if (pthread_mutex_unlock(&comp_mutex)) {
+        syslog(LOG_ERR, "Failed to unlock completion mutex after TERM received");
+        return -1;
+    }
+
+    if (pthread_join(comp_thread, NULL)) {
+        syslog(LOG_ERR, "Failed to join completion thread");
+        return -1;
+    }
+
+    //Interrupt the timestamp thread in case it's mid nanosleep
+    //May unset loop_flag again but that should be fine
+    if (pthread_kill(ts_thread, SIGTERM)) {
+        syslog(LOG_ERR, "Failed to signal timestamp thread to stop");
+        return -1;
+    }
+    if (pthread_join(ts_thread, NULL)) {
+        syslog(LOG_ERR, "Failed to join timestamp thread");
+        return -1;
+    }
+
+    close(f_fd);
 
     if (remove("/var/tmp/aesdsocketdata") == -1){
         syslog(LOG_ERR, "Failed to remove tmp file");
