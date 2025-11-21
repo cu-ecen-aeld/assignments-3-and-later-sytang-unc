@@ -45,6 +45,7 @@ struct aesd_buffer_entry *aesd_circular_buffer_find_entry_offset_for_fpos(struct
             *entry_offset_byte_rtn = char_offset;
             return &buffer->entry[entry_offset];
         }
+        char_offset -= buffer->entry[entry_offset].size;
         entry_offset++;
         entry_offset %= AESDCHAR_MAX_WRITE_OPERATIONS_SUPPORTED;
 
