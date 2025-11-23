@@ -33,11 +33,12 @@ struct aesd_buffer_entry *aesd_circular_buffer_find_entry_offset_for_fpos(struct
     * TODO: implement per description
     */
 
+    uint8_t entry_offset;
+
     if (!buffer->full &&
         buffer->in_offs == buffer->out_offs)
         return NULL;
 
-    uint8_t entry_offset;
     entry_offset = buffer->out_offs;
 
     do {
@@ -62,12 +63,12 @@ struct aesd_buffer_entry *aesd_circular_buffer_find_entry_offset_for_fpos(struct
 * Any necessary locking must be handled by the caller
 * Any memory referenced in @param add_entry must be allocated by and/or must have a lifetime managed by the caller.
 */
-char* aesd_circular_buffer_add_entry(struct aesd_circular_buffer *buffer, const struct aesd_buffer_entry *add_entry)
+const char* aesd_circular_buffer_add_entry(struct aesd_circular_buffer *buffer, const struct aesd_buffer_entry *add_entry)
 {
     /**
     * TODO: implement per description
     */
-    char *ret;
+    const char *ret;
     ret = NULL;
 
     buffer->entry[buffer->in_offs++] = *add_entry;

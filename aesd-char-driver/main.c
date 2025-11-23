@@ -62,11 +62,12 @@ ssize_t aesd_read(struct file *filp, char __user *buf, size_t count,
      * TODO: handle read
      */
 
+    struct aesd_buffer_entry *entry;
+    size_t offset, rem;
+
     if (mutex_lock_interruptible(&aesd_device.mutex) == -EINTR)
         return -ERESTARTSYS;
 
-    struct aesd_buffer_entry *entry;
-    size_t offset, rem;
     entry = aesd_circular_buffer_find_entry_offset_for_fpos(&aesd_device.buf, *f_pos, &offset);
     if (!entry)
         return 0;
@@ -86,14 +87,15 @@ ssize_t aesd_read(struct file *filp, char __user *buf, size_t count,
     return retval;
 }
 
-static ssize_t _do_write(const char *buf, size_t count) {
+static void _do_write(const char *buf, size_t count) {
     struct aesd_buffer_entry entry;
+    const char *free_ptr;
+
     entry = (struct aesd_buffer_entry) {
         .buffptr = buf,
         .size = count
     };
 
-    char *free_ptr;
     free_ptr = aesd_circular_buffer_add_entry(&aesd_device.buf, &entry);
     if (free_ptr)
         kfree(free_ptr);
@@ -103,13 +105,17 @@ static ssize_t _do_write(const char *buf, size_t count) {
 
 static ssize_t do_write(const char *buf, size_t count) {
     bool end_command;
+    struct write_node *wn;
+    const char *write_buf;
+    size_t offset;
+    struct list_head *pos, *n;
+
     end_command = buf[count-1] == '\n';
     if (list_empty(&partial) && end_command) {
         _do_write(buf, count);
         return count;
     }
 
-    struct write_node *wn;
     wn = (struct write_node*) kmalloc(sizeof(struct write_node), GFP_KERNEL);
     if (!wn)
         return -ENOMEM;
@@ -122,14 +128,11 @@ static ssize_t do_write(const char *buf, size_t count) {
     if (!end_command)
         return count;
     
-    const char *write_buf;
-    write_buf = (const char*) kmalloc(partial_size, GFP_KERNEL);
+    write_buf = (char*) kmalloc(partial_size, GFP_KERNEL);
     if (!write_buf)
         return -ENOMEM;
 
-    size_t offset;
     offset = 0;
-    struct list_head *pos, *n;
     list_for_each_safe(pos, n, &partial) {
         struct write_node *wn;
         wn = list_entry(pos, struct write_node, lh);
@@ -148,6 +151,7 @@ ssize_t aesd_write(struct file *filp, const char __user *buf, size_t count,
                 loff_t *f_pos)
 {
     ssize_t retval = -ENOMEM;
+    char *kbuf;
     PDEBUG("write %zu bytes with offset %lld",count,*f_pos);
     /**
      * TODO: handle write
@@ -156,8 +160,7 @@ ssize_t aesd_write(struct file *filp, const char __user *buf, size_t count,
     if (mutex_lock_interruptible(&aesd_device.mutex) == -EINTR)
         return -ERESTARTSYS;
 
-    const char *kbuf;
-    kbuf = (const char*) kmalloc(count, GFP_KERNEL);
+    kbuf = (char*) kmalloc(count, GFP_KERNEL);
     if (copy_from_user(kbuf, buf, count)) {
         printk(KERN_ALERT "Failed copy from user");
         retval = -EAGAIN;
@@ -227,14 +230,14 @@ int aesd_init_module(void)
 void aesd_cleanup_module(void)
 {
     dev_t devno = MKDEV(aesd_major, aesd_minor);
+    uint8_t i;
+    struct aesd_buffer_entry *entry;
 
     cdev_del(&aesd_device.cdev);
 
     /**
      * TODO: cleanup AESD specific poritions here as necessary
      */
-    uint8_t i;
-    struct aesd_buffer_entry *entry;
     AESD_CIRCULAR_BUFFER_FOREACH(entry,&aesd_device.buf,i) {
         if (entry->size)
             kfree(entry->buffptr);
