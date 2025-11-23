@@ -68,20 +68,25 @@ ssize_t aesd_read(struct file *filp, char __user *buf, size_t count,
         return -ERESTARTSYS;
 
     entry = aesd_circular_buffer_find_entry_offset_for_fpos(&aesd_device.buf, *f_pos, &offset);
-    if (!entry)
-        return 0;
+    if (!entry) {
+        retval = 0;
+        goto unlock_aesd_read;
+    }
 
     rem = entry->size - offset;
     if (rem < count)
         count = rem;
 
-    if (copy_to_user(buf, entry->buffptr, count)) {
+    if (copy_to_user(buf, entry->buffptr + offset, count)) {
         printk(KERN_ALERT "Failed copy to user");
         retval = -EAGAIN;
+        goto unlock_aesd_read;
     }
 
-    mutex_unlock(&aesd_device.mutex);
     retval = count;
+
+unlock_aesd_read:
+    mutex_unlock(&aesd_device.mutex);
 
     return retval;
 }
