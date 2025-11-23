@@ -17,14 +17,23 @@
 #include <linux/types.h>
 #include <linux/cdev.h>
 #include <linux/fs.h> // file_operations
+#include <linux/list.h>
 #include "aesdchar.h"
 int aesd_major =   0; // use dynamic major
 int aesd_minor =   0;
 
-MODULE_AUTHOR("Your Name Here"); /** TODO: fill in your name **/
+MODULE_AUTHOR("Stephen Tang"); /** TODO: fill in your name **/
 MODULE_LICENSE("Dual BSD/GPL");
 
 struct aesd_dev aesd_device;
+
+LIST_HEAD(partial);
+struct write_node {
+    const char *buf;
+    size_t size;
+    struct list_head lh;
+};
+size_t partial_size;
 
 int aesd_open(struct inode *inode, struct file *filp)
 {
@@ -52,7 +61,87 @@ ssize_t aesd_read(struct file *filp, char __user *buf, size_t count,
     /**
      * TODO: handle read
      */
+
+    if (mutex_lock_interruptible(&aesd_device.mutex) == -EINTR)
+        return -ERESTARTSYS;
+
+    struct aesd_buffer_entry *entry;
+    size_t offset, rem;
+    entry = aesd_circular_buffer_find_entry_offset_for_fpos(&aesd_device.buf, *f_pos, &offset);
+    if (!entry)
+        return 0;
+
+    rem = entry->size - offset;
+    if (rem < count)
+        count = rem;
+
+    if (copy_to_user(buf, entry->buffptr, count)) {
+        printk(KERN_ALERT "Failed copy to user");
+        retval = -EAGAIN;
+    }
+
+    mutex_unlock(&aesd_device.mutex);
+    retval = count;
+
     return retval;
+}
+
+static ssize_t _do_write(const char *buf, size_t count) {
+    struct aesd_buffer_entry entry;
+    entry = (struct aesd_buffer_entry) {
+        .buffptr = buf,
+        .size = count
+    };
+
+    char *free_ptr;
+    free_ptr = aesd_circular_buffer_add_entry(&aesd_device.buf, &entry);
+    if (free_ptr)
+        kfree(free_ptr);
+
+    partial_size = 0;
+}
+
+static ssize_t do_write(const char *buf, size_t count) {
+    bool end_command;
+    end_command = buf[count-1] == '\n';
+    if (list_empty(&partial) && end_command) {
+        _do_write(buf, count);
+        return count;
+    }
+
+    struct write_node *wn;
+    wn = (struct write_node*) kmalloc(sizeof(struct write_node), GFP_KERNEL);
+    if (!wn)
+        return -ENOMEM;
+    *wn = (struct write_node) {
+        .buf = buf,
+        .size = count
+    };
+    list_add_tail(&wn->lh, &partial);
+    partial_size += count;
+    if (!end_command)
+        return count;
+    
+    const char *write_buf;
+    write_buf = (const char*) kmalloc(partial_size, GFP_KERNEL);
+    if (!write_buf)
+        return -ENOMEM;
+
+    size_t offset;
+    offset = 0;
+    struct list_head *pos, *n;
+    list_for_each_safe(pos, n, &partial) {
+        struct write_node *wn;
+        wn = list_entry(pos, struct write_node, lh);
+        strncpy(write_buf + offset, wn->buf, wn->size);
+        list_del(pos);
+        kfree(wn->buf);
+        kfree(wn);
+    }
+
+    _do_write(write_buf, partial_size);
+
+    return count;
 }
 
 ssize_t aesd_write(struct file *filp, const char __user *buf, size_t count,
@@ -63,6 +152,23 @@ ssize_t aesd_write(struct file *filp, const char __user *buf, size_t count,
     /**
      * TODO: handle write
      */
+
+    if (mutex_lock_interruptible(&aesd_device.mutex) == -EINTR)
+        return -ERESTARTSYS;
+
+    const char *kbuf;
+    kbuf = (const char*) kmalloc(count, GFP_KERNEL);
+    if (copy_from_user(kbuf, buf, count)) {
+        printk(KERN_ALERT "Failed copy from user");
+        retval = -EAGAIN;
+        goto unlock_aesd_write;
+    }
+
+    retval = do_write(kbuf, count);
+
+unlock_aesd_write:
+    mutex_unlock(&aesd_device.mutex);
+
     return retval;
 }
 struct file_operations aesd_fops = {
@@ -106,6 +212,9 @@ int aesd_init_module(void)
      * TODO: initialize the AESD specific portion of the device
      */
 
+    aesd_circular_buffer_init(&aesd_device.buf);
+    mutex_init(&aesd_device.mutex);
+
     result = aesd_setup_cdev(&aesd_device);
 
     if( result ) {
@@ -124,6 +233,12 @@ void aesd_cleanup_module(void)
     /**
      * TODO: cleanup AESD specific poritions here as necessary
      */
+    uint8_t i;
+    struct aesd_buffer_entry *entry;
+    AESD_CIRCULAR_BUFFER_FOREACH(entry,&aesd_device.buf,i) {
+        if (entry->size)
+            kfree(entry->buffptr);
+    }
 
     unregister_chrdev_region(devno, 1);
 }

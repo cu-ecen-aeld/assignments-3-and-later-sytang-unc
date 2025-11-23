@@ -14,6 +14,10 @@
 #include "loop_flag.h"
 #include "packet_buffer.h"
 
+#ifndef USE_AESD_CHAR_DEVICE
+#define USE_AESD_CHAR_DEVICE 1
+#endif
+
 struct thread_arg {
     int s_fd;
     struct sockaddr_in addr;
@@ -26,7 +30,9 @@ static int waiting_on = 0;
 static pthread_mutex_t comp_mutex = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t comp_cond = PTHREAD_COND_INITIALIZER;
 
+#ifndef USE_AESD_CHAR_DEVICE
 static pthread_mutex_t file_mutex = PTHREAD_MUTEX_INITIALIZER;
+#endif
 static int f_fd;
 
 int process_packets(int s_fd) {
@@ -41,15 +47,19 @@ int process_packets(int s_fd) {
     nr_r = 1;
     while (loop_flag && nr_r) {
         nr_r = read_pb(s_fd, &pb);
+#ifndef USE_AESD_CHAR_DEVICE
         if (pthread_mutex_lock(&file_mutex)) {
             syslog(LOG_ERR, "Failed to lock file mutex for writing");
             return -1;
         }
+#endif
         write_pb(f_fd, s_fd, &pb);
+#ifndef USE_AESD_CHAR_DEVICE
         if (pthread_mutex_unlock(&file_mutex)) {
             syslog(LOG_ERR, "Failed to unlock file mutex after writing");
             return -1;
         }
+#endif
     }
     
     free_pb(&pb);
@@ -112,6 +122,8 @@ void *do_join_complete(void *arg) {
     return NULL;
 }
 
+
+#ifndef USE_AESD_CHAR_DEVICE
 void *do_print_ts(void *arg) {
     char t_str[100];
     time_t t;
@@ -148,12 +160,20 @@ void *do_print_ts(void *arg) {
     }
     return NULL;
 }
+#endif
 
 int do_aesdsocket(int socket_fd) {
+#ifdef USE_AESD_CHAR_DEVICE
+    if ((f_fd = open("/dev/aesdchar", O_RDWR, S_IRUSR | S_IWUSR)) == -1) {
+        syslog(LOG_ERR, "Failed to open /dev/aesdchar");
+        return -1;
+    }
+#else
     if ((f_fd = open("/var/tmp/aesdsocketdata", O_RDWR | O_CREAT, S_IRUSR | S_IWUSR)) == -1) {
         syslog(LOG_ERR, "Failed to open /var/tmp/aesdsocketdata");
         return -1;
     }
+#endif
 
     pthread_t comp_thread;
     if (pthread_create(&comp_thread, NULL, do_join_complete, NULL)) {
@@ -161,11 +181,13 @@ int do_aesdsocket(int socket_fd) {
         return -1;
     }
 
+#ifndef USE_AESD_CHAR_DEVICE
     pthread_t ts_thread;
     if (pthread_create(&ts_thread, NULL, do_print_ts, NULL)) {
         syslog(LOG_ERR, "Failed ot create ts printing thread");
         return -1;
     }
+#endif
 
     if (listen(socket_fd, 5) == -1){
         syslog(LOG_ERR, "Failed to listen on socket");
@@ -233,6 +255,7 @@ int do_aesdsocket(int socket_fd) {
         return -1;
     }
 
+#ifndef USE_AESD_CHAR_DEVICE
     //Interrupt the timestamp thread in case it's mid nanosleep
     //May unset loop_flag again but that should be fine
     if (pthread_kill(ts_thread, SIGTERM)) {
@@ -243,13 +266,16 @@ int do_aesdsocket(int socket_fd) {
         syslog(LOG_ERR, "Failed to join timestamp thread");
         return -1;
     }
+#endif
 
     close(f_fd);
 
+#ifndef USE_AESD_CHAR_DEVICE
     if (remove("/var/tmp/aesdsocketdata") == -1){
         syslog(LOG_ERR, "Failed to remove tmp file");
         return -1;
     }
+#endif
 
     return 0;
 }
