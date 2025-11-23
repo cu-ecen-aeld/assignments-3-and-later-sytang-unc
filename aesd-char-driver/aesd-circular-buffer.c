@@ -71,12 +71,13 @@ const char* aesd_circular_buffer_add_entry(struct aesd_circular_buffer *buffer, 
     const char *ret;
     ret = NULL;
 
+    if (buffer->full)
+        ret = buffer->entry[buffer->out_offs].buffptr;
+
     buffer->entry[buffer->in_offs++] = *add_entry;
     buffer->in_offs %= AESDCHAR_MAX_WRITE_OPERATIONS_SUPPORTED;
-    if (buffer->full) {
-        ret = buffer->entry[buffer->out_offs].buffptr;
+    if (buffer->full)
         buffer->out_offs = buffer->in_offs;
-    }
     else 
         buffer->full = (buffer->in_offs == buffer->out_offs);
 
