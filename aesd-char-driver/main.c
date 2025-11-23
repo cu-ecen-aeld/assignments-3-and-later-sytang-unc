@@ -57,13 +57,12 @@ ssize_t aesd_read(struct file *filp, char __user *buf, size_t count,
                 loff_t *f_pos)
 {
     ssize_t retval = 0;
+    struct aesd_buffer_entry *entry;
+    size_t offset, rem;
     PDEBUG("read %zu bytes with offset %lld",count,*f_pos);
     /**
      * TODO: handle read
      */
-
-    struct aesd_buffer_entry *entry;
-    size_t offset, rem;
 
     if (mutex_lock_interruptible(&aesd_device.mutex) == -EINTR)
         return -ERESTARTSYS;
@@ -106,7 +105,7 @@ static void _do_write(const char *buf, size_t count) {
 static ssize_t do_write(const char *buf, size_t count) {
     bool end_command;
     struct write_node *wn;
-    const char *write_buf;
+    char *write_buf;
     size_t offset;
     struct list_head *pos, *n;
 
