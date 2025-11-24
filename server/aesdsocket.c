@@ -38,10 +38,12 @@ static pthread_mutex_t file_mutex = PTHREAD_MUTEX_INITIALIZER;
 #endif
 
 static int send_file(FILE *s_stream, int f_fd) {
+#ifndef USE_AESD_CHAR_DEVICE
     if (lseek(f_fd, 0, SEEK_SET) == -1) {
         syslog(LOG_ERR, "Failed to seek to beginning of file");
         return -1;
     }
+#endif
 
     char buf[AESD_DEFAULT_LEN];
     ssize_t nr_r;
@@ -59,8 +61,10 @@ static int send_file(FILE *s_stream, int f_fd) {
 
 int process_packets(FILE *s_stream) {
     int f_fd, ret;
-    size_t nr_r;
+    ssize_t nr_r;
     char *line_ptr;
+    size_t line_size;
+
 #ifdef USE_AESD_CHAR_DEVICE
     struct aesd_seekto st;
 #endif
@@ -80,13 +84,13 @@ int process_packets(FILE *s_stream) {
     line_ptr = NULL;
     nr_r = 1;
     while (loop_flag && nr_r && ret != -1) {
-        if (getline(&line_ptr, &nr_r, s_stream) == -1) {
-            nr_r = 0;
+        if ((nr_r = getline(&line_ptr, &line_size, s_stream)) == -1) {
             if (!feof(s_stream)) {
                 syslog(LOG_ERR, "Failed to get line from socket stream");
                 ret = -1;
             }
-            free(line_ptr);
+            else
+                nr_r = 0;
             continue;
         }
 #ifndef USE_AESD_CHAR_DEVICE
@@ -127,6 +131,8 @@ unlock_pp:
         line_ptr = NULL;
     }
 
+    if (line_ptr)
+        free(line_ptr);
     close(f_fd);
 
     return ret;
