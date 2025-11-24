@@ -139,9 +139,9 @@ static ssize_t do_write(const char *buf, size_t count) {
 
     offset = 0;
     list_for_each_safe(pos, n, &partial) {
-        struct write_node *wn;
         wn = list_entry(pos, struct write_node, lh);
         strncpy(write_buf + offset, wn->buf, wn->size);
+        offset += wn->size;
         list_del(pos);
         kfree(wn->buf);
         kfree(wn);
