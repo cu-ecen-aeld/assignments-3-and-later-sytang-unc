@@ -8,13 +8,10 @@ LDFLAGS ?= -lpthread -lrt
 
 all: $(TARGET)
 
-$(TARGET): aesdsocket.c packet_buffer.c loop_flag.c fifo.o
+$(TARGET): aesdsocket.c loop_flag.c
 	$(CC) $(CFLAGS) $^ -o $@ $(INCLUDES) $(LDFLAGS)
-
-fifo.o: fifo.c
-	$(CC) $(CFLAGS) $^ -c -o $@
 
 .PHONY: clean
 
 clean:
-	-rm $(TARGET) fifo.o
+	-rm $(TARGET)

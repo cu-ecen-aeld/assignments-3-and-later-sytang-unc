@@ -1,6 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
 #include<syslog.h>
 #include<unistd.h>
+#include<stdlib.h>
 #include<stdio.h>
 #include<sys/socket.h>
 #include<netdb.h>
@@ -12,14 +13,16 @@
 #include<time.h>
 
 #include "loop_flag.h"
-#include "packet_buffer.h"
+#include "../aesd-char-driver/aesd_ioctl.h"
 
 #ifndef USE_AESD_CHAR_DEVICE
 #define USE_AESD_CHAR_DEVICE 1
 #endif
 
+#define AESD_DEFAULT_LEN 100
+
 struct thread_arg {
-    int s_fd;
+    FILE *s_stream;
     struct sockaddr_in addr;
     pthread_t thread;
     struct thread_arg *next;
@@ -34,17 +37,35 @@ static pthread_cond_t comp_cond = PTHREAD_COND_INITIALIZER;
 static pthread_mutex_t file_mutex = PTHREAD_MUTEX_INITIALIZER;
 #endif
 
-int process_packets(int s_fd) {
-    struct packet_buffer pb;
-    int f_fd, ret;
-    ssize_t nr_r;
-
-    ret = 0;
-
-    if (init_pb(&pb) == -1) {
-        syslog(LOG_ERR, "Failed to init packet_buffer");
+static int send_file(FILE *s_stream, int f_fd) {
+    if (lseek(f_fd, 0, SEEK_SET) == -1) {
+        syslog(LOG_ERR, "Failed to seek to beginning of file");
         return -1;
     }
+
+    char buf[AESD_DEFAULT_LEN];
+    ssize_t nr_r;
+    nr_r = 1;
+    while (nr_r) {
+        nr_r = read(f_fd, buf, AESD_DEFAULT_LEN);
+        if (nr_r == -1) {
+            syslog(LOG_ERR, "Failed to read from file");
+            return -1;
+        }
+        fwrite(buf, sizeof(char), nr_r, s_stream);
+    }
+    return 0;
+}
+
+int process_packets(FILE *s_stream) {
+    int f_fd, ret;
+    size_t nr_r;
+    char *line_ptr;
+#ifdef USE_AESD_CHAR_DEVICE
+    struct aesd_seekto st;
+#endif
+
+    ret = 0;
 
 #ifdef USE_AESD_CHAR_DEVICE
     if ((f_fd = open("/dev/aesdchar", O_RDWR, S_IRUSR | S_IWUSR)) == -1) {
@@ -54,43 +75,68 @@ int process_packets(int s_fd) {
         syslog(LOG_ERR, "Failed to open /var/tmp/aesdsocketdata");
 #endif
         ret = -1;
-        goto pp_free;
     }
 
+    line_ptr = NULL;
     nr_r = 1;
-    while (loop_flag && nr_r) {
-        nr_r = read_pb(s_fd, &pb);
+    while (loop_flag && nr_r && ret != -1) {
+        if (getline(&line_ptr, &nr_r, s_stream) == -1) {
+            nr_r = 0;
+            if (!feof(s_stream)) {
+                syslog(LOG_ERR, "Failed to get line from socket stream");
+                ret = -1;
+                continue;
+            }
+        }
 #ifndef USE_AESD_CHAR_DEVICE
         if (pthread_mutex_lock(&file_mutex)) {
             syslog(LOG_ERR, "Failed to lock file mutex for writing");
             ret = -1;
-            goto pp_close;
+            continue;
         }
+#else
+        if (sscanf(line_ptr, "AESDCHAR_IOCSEEKTO:%u,%u", &st.write_cmd, &st.write_cmd_offset) == 2) {
+            if (ioctl(f_fd, AESDCHAR_IOCSEEKTO, &st) == -1){
+                syslog(LOG_ERR, "Failed ioctl");
+                ret = -1;
+                continue;
+            }       
+        }
+        else
 #endif
-        write_pb(f_fd, s_fd, &pb, !(USE_AESD_CHAR_DEVICE));
+        if (write(f_fd, line_ptr, nr_r) == -1) {
+            syslog(LOG_ERR, "Failed to write to file");
+            ret = -1;
+            goto unlock_pp;
+        }
+        
+        if (send_file(s_stream, f_fd) == -1) {
+            ret = -1;
+            goto unlock_pp;
+        }
+
+unlock_pp:
 #ifndef USE_AESD_CHAR_DEVICE
         if (pthread_mutex_unlock(&file_mutex)) {
             syslog(LOG_ERR, "Failed to unlock file mutex after writing");
             ret = -1;
-            goto pp_close;
         }
 #endif
+        free(line_ptr);
+        line_ptr = NULL;
     }
 
-pp_close:
     close(f_fd);
-pp_free:
-    free_pb(&pb);
 
     return ret;
 }
 
 void *do_process_packets(void *arg) {
     struct thread_arg *ta = (struct thread_arg*) arg;
-    process_packets(ta->s_fd);
+    process_packets(ta->s_stream);
 
     syslog(LOG_USER, "Closed connection from %s", inet_ntoa(ta->addr.sin_addr));
-    close(ta->s_fd);
+    fclose(ta->s_stream);
 
     if (pthread_mutex_lock(&comp_mutex)) {
         syslog(LOG_ERR, "Failed to lock completion mutex on thread completion");
@@ -224,7 +270,11 @@ int do_aesdsocket(int socket_fd) {
             return -1;
         }
         syslog(LOG_USER, "Accepted connection from %s", inet_ntoa(ta->addr.sin_addr));
-        ta->s_fd = s_fd;
+        ta->s_stream = fdopen(s_fd, "r+");
+        if (!ta->s_stream) {
+            syslog(LOG_ERR, "Failed to open socket stream");
+            return -1;
+        }
         ta->next = NULL;
 
         if (pthread_mutex_lock(&comp_mutex)) {

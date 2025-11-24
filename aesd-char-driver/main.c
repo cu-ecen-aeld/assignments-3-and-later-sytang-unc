@@ -18,7 +18,10 @@
 #include <linux/cdev.h>
 #include <linux/fs.h> // file_operations
 #include <linux/list.h>
+
 #include "aesdchar.h"
+#include "aesd_ioctl.h"
+
 int aesd_major =   0; // use dynamic major
 int aesd_minor =   0;
 
@@ -79,7 +82,7 @@ ssize_t aesd_read(struct file *filp, char __user *buf, size_t count,
 
     if (copy_to_user(buf, entry->buffptr + offset, count)) {
         printk(KERN_ALERT "Failed copy to user");
-        retval = -EAGAIN;
+        retval = -EFAULT;
         goto unlock_aesd_read;
     }
 
@@ -168,7 +171,7 @@ ssize_t aesd_write(struct file *filp, const char __user *buf, size_t count,
     kbuf = (char*) kmalloc(count, GFP_KERNEL);
     if (copy_from_user(kbuf, buf, count)) {
         printk(KERN_ALERT "Failed copy from user");
-        retval = -EAGAIN;
+        retval = -EFAULT;
         goto unlock_aesd_write;
     }
 
@@ -179,12 +182,87 @@ unlock_aesd_write:
 
     return retval;
 }
+
+static loff_t aesd_llseek(struct file *filp, loff_t off, int whence) {
+    loff_t size;
+    int i;
+    struct aesd_buffer_entry *entry;
+    loff_t ret;
+
+    if (mutex_lock_interruptible(&aesd_device.mutex) == -EINTR)
+        return -ERESTARTSYS;
+
+    size = 0;
+    AESD_CIRCULAR_BUFFER_FOREACH(entry,&aesd_device.buf,i)
+        size += entry->size;
+
+    ret = fixed_size_llseek(filp, off, whence, size);
+
+    mutex_unlock(&aesd_device.mutex);
+
+    return ret;
+}
+
+static long do_iocseekto(struct file *filp, uint32_t write_cmd, uint32_t write_cmd_offset) {
+    long ret;
+    uint8_t entry_offset;
+    loff_t new_pos;
+
+    ret = 0;
+
+    if (mutex_lock_interruptible(&aesd_device.mutex) == -EINTR)
+        return -ERESTARTSYS;
+
+    if (write_cmd >= aesd_circular_buffer_nr_entries(&aesd_device.buf)) {
+        ret = -EINVAL;
+        goto unlock_iocseekto;
+    }
+
+    new_pos = 0;
+    entry_offset = &aesd_device.buf.out_offs;
+    while (write_cmd) {
+        new_pos += aesd_device.buf.entry[entry_offset++].size;
+        entry_offset %= AESDCHAR_MAX_WRITE_OPERATIONS_SUPPORTED;
+        write_cmd--;
+    }
+
+    if (write_cmd_offset >= aesd_device.buf.entry[entry_offset].size) {
+        ret = -EINVAL;
+        goto unlock_iocseekto;
+    }
+
+    new_pos += write_cmd_offset;
+    filp->f_pos = new_pos;
+
+unlock_iocseekto:
+    mutex_unlock(&aesd_device.mutex);
+
+    return ret;
+}
+
+static long aesd_unlocked_ioctl(struct file *filp, unsigned int cmd, unsigned long arg) {
+    switch (cmd) {
+        case AESDCHAR_IOCSEEKTO:
+            struct aesd_seekto st_arg;
+            if (copy_from_user(&aesd_seekto, (struct aesd_seekto __user *) arg, sizeof(struct aesd_seekto))) {
+                printk(KERN_ALERT "Failed to copy from user");
+                return -EFAULT;
+            }
+            return do_iocseekto(filp, st_arg.write_cmd, st_arg.write_cmd_offset);
+            break;
+        default:
+		    return -ENOTTY;
+    }
+}
+
 struct file_operations aesd_fops = {
-    .owner =    THIS_MODULE,
-    .read =     aesd_read,
-    .write =    aesd_write,
-    .open =     aesd_open,
-    .release =  aesd_release,
+    .owner =            THIS_MODULE,
+    .read =             aesd_read,
+    .write =            aesd_write,
+    .open =             aesd_open,
+    .release =          aesd_release,
+    .llseek =           aesd_llseek,
+    .unlocked_ioctl =   aesd_unlocked_ioctl
 };
 
 static int aesd_setup_cdev(struct aesd_dev *dev)
@@ -243,10 +321,9 @@ void aesd_cleanup_module(void)
     /**
      * TODO: cleanup AESD specific poritions here as necessary
      */
-    AESD_CIRCULAR_BUFFER_FOREACH(entry,&aesd_device.buf,i) {
+    AESD_CIRCULAR_BUFFER_FOREACH(entry,&aesd_device.buf,i)
         if (entry->size)
             kfree(entry->buffptr);
-    }
 
     unregister_chrdev_region(devno, 1);
 }
