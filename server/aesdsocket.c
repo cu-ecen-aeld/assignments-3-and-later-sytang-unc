@@ -33,15 +33,28 @@ static pthread_cond_t comp_cond = PTHREAD_COND_INITIALIZER;
 #ifndef USE_AESD_CHAR_DEVICE
 static pthread_mutex_t file_mutex = PTHREAD_MUTEX_INITIALIZER;
 #endif
-static int f_fd;
 
 int process_packets(int s_fd) {
     struct packet_buffer pb;
+    int f_fd, ret;
     ssize_t nr_r;
+
+    ret = 0;
 
     if (init_pb(&pb) == -1) {
         syslog(LOG_ERR, "Failed to init packet_buffer");
         return -1;
+    }
+
+#ifdef USE_AESD_CHAR_DEVICE
+    if ((f_fd = open("/dev/aesdchar", O_RDWR, S_IRUSR | S_IWUSR)) == -1) {
+        syslog(LOG_ERR, "Failed to open /dev/aesdchar");
+#else
+    if ((f_fd = open("/var/tmp/aesdsocketdata", O_RDWR | O_CREAT, S_IRUSR | S_IWUSR)) == -1) {
+        syslog(LOG_ERR, "Failed to open /var/tmp/aesdsocketdata");
+#endif
+        ret = -1;
+        goto pp_free;
     }
 
     nr_r = 1;
@@ -50,21 +63,26 @@ int process_packets(int s_fd) {
 #ifndef USE_AESD_CHAR_DEVICE
         if (pthread_mutex_lock(&file_mutex)) {
             syslog(LOG_ERR, "Failed to lock file mutex for writing");
-            return -1;
+            ret = -1;
+            goto pp_close;
         }
 #endif
         write_pb(f_fd, s_fd, &pb, !(USE_AESD_CHAR_DEVICE));
 #ifndef USE_AESD_CHAR_DEVICE
         if (pthread_mutex_unlock(&file_mutex)) {
             syslog(LOG_ERR, "Failed to unlock file mutex after writing");
-            return -1;
+            ret = -1;
+            goto pp_close;
         }
 #endif
     }
-    
+
+pp_close:
+    close(f_fd);
+pp_free:
     free_pb(&pb);
 
-    return 0;
+    return ret;
 }
 
 void *do_process_packets(void *arg) {
@@ -163,18 +181,6 @@ void *do_print_ts(void *arg) {
 #endif
 
 int do_aesdsocket(int socket_fd) {
-#ifdef USE_AESD_CHAR_DEVICE
-    if ((f_fd = open("/dev/aesdchar", O_RDWR, S_IRUSR | S_IWUSR)) == -1) {
-        syslog(LOG_ERR, "Failed to open /dev/aesdchar");
-        return -1;
-    }
-#else
-    if ((f_fd = open("/var/tmp/aesdsocketdata", O_RDWR | O_CREAT, S_IRUSR | S_IWUSR)) == -1) {
-        syslog(LOG_ERR, "Failed to open /var/tmp/aesdsocketdata");
-        return -1;
-    }
-#endif
-
     pthread_t comp_thread;
     if (pthread_create(&comp_thread, NULL, do_join_complete, NULL)) {
         syslog(LOG_ERR, "Failed to create completion cleanup thread");
@@ -266,11 +272,7 @@ int do_aesdsocket(int socket_fd) {
         syslog(LOG_ERR, "Failed to join timestamp thread");
         return -1;
     }
-#endif
 
-    close(f_fd);
-
-#ifndef USE_AESD_CHAR_DEVICE
     if (remove("/var/tmp/aesdsocketdata") == -1){
         syslog(LOG_ERR, "Failed to remove tmp file");
         return -1;
