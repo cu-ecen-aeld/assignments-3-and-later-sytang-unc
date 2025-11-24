@@ -85,8 +85,9 @@ int process_packets(FILE *s_stream) {
             if (!feof(s_stream)) {
                 syslog(LOG_ERR, "Failed to get line from socket stream");
                 ret = -1;
-                continue;
             }
+            free(line_ptr);
+            continue;
         }
 #ifndef USE_AESD_CHAR_DEVICE
         if (pthread_mutex_lock(&file_mutex)) {
