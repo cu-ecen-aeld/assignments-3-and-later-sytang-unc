@@ -219,7 +219,7 @@ static long do_iocseekto(struct file *filp, uint32_t write_cmd, uint32_t write_c
     }
 
     new_pos = 0;
-    entry_offset = &aesd_device.buf.out_offs;
+    entry_offset = aesd_device.buf.out_offs;
     while (write_cmd) {
         new_pos += aesd_device.buf.entry[entry_offset++].size;
         entry_offset %= AESDCHAR_MAX_WRITE_OPERATIONS_SUPPORTED;
@@ -244,7 +244,7 @@ static long aesd_unlocked_ioctl(struct file *filp, unsigned int cmd, unsigned lo
     switch (cmd) {
         case AESDCHAR_IOCSEEKTO:
             struct aesd_seekto st_arg;
-            if (copy_from_user(&aesd_seekto, (struct aesd_seekto __user *) arg, sizeof(struct aesd_seekto))) {
+            if (copy_from_user(&st_arg, (struct aesd_seekto __user *) arg, sizeof(struct aesd_seekto))) {
                 printk(KERN_ALERT "Failed to copy from user");
                 return -EFAULT;
             }
