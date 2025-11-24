@@ -53,7 +53,7 @@ int process_packets(int s_fd) {
             return -1;
         }
 #endif
-        write_pb(f_fd, s_fd, &pb);
+        write_pb(f_fd, s_fd, &pb, !(USE_AESD_CHAR_DEVICE));
 #ifndef USE_AESD_CHAR_DEVICE
         if (pthread_mutex_unlock(&file_mutex)) {
             syslog(LOG_ERR, "Failed to unlock file mutex after writing");

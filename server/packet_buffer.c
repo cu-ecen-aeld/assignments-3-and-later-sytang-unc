@@ -55,8 +55,8 @@ ssize_t read_pb(int s_fd, struct packet_buffer *pb) {
     return nr_p;
 }
 
-static int send_file(int s_fd, int f_fd) {
-    if (lseek(f_fd, 0, SEEK_SET) == -1) {
+static int send_file(int s_fd, int f_fd, bool need_seek) {
+    if (need_seek && lseek(f_fd, 0, SEEK_SET) == -1) {
         syslog(LOG_ERR, "Failed to seek to beginning of file");
         return -1;
     }
@@ -78,7 +78,7 @@ static int send_file(int s_fd, int f_fd) {
     return 0;
 }
 
-ssize_t write_pb(int f_fd, int s_fd, struct packet_buffer *pb) {
+ssize_t write_pb(int f_fd, int s_fd, struct packet_buffer *pb, bool need_seek) {
     ssize_t nr_w;
 
     if (!pb->return_cnt)
@@ -94,7 +94,7 @@ ssize_t write_pb(int f_fd, int s_fd, struct packet_buffer *pb) {
             }
             nr_w += nr_g;
         } while (pb->buf[nr_g - 1] != '\n');
-        if (send_file(s_fd, f_fd) == -1)
+        if (send_file(s_fd, f_fd, need_seek) == -1)
             return -1;
         pb->return_cnt--;
     }
